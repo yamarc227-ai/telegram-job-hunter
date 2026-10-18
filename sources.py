@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 
 UA = 'PersonalJobHunter/0.2 (+https://github.com/yamarc227-ai/telegram-job-hunter)'
 ROLE = re.compile(r'аналитик|аналитика|analyst|analytics', re.I)
-SPECIALTY = re.compile(r'продукт|коммерч|бизнес|данных|маркетинг|финанс|рост|монетиз|\\bbi\\b|product|commercial|business|\\bdata\\b|marketing|e-commerce|growth|revenue|game', re.I)
+SPECIALTY = re.compile(r'продукт|коммерч|бизнес|данных|маркетинг|финанс|рост|монетиз|\bbi\b|product|commercial|business|\bdata\b|marketing|e-commerce|growth|revenue|game', re.I)
 EXCLUDED = re.compile(r'системн|system[s]? analyst|data engineer|etl|\bdwh\b|банк|banking|1с|1c|битрикс|асутп|диасофт|full.?stack|фуллстек', re.I)
 REMOTE = re.compile(r'удал[её]н|remote|любой точк[еи] мира', re.I)
 
@@ -156,7 +156,7 @@ async def hh_api(client):
         raise SourceUnavailable('не настроен HH_ACCESS_TOKEN в Railway')
     # Scope credentials to this request, never to the shared multi-source client.
     response = await client.get('https://api.hh.ru/vacancies',
-        headers={'Authorization': f'Bearer {token}', 'HH-User-Agent': UA},
+        headers={'Authorization': f'Bearer {token}', 'HH-User-Agent': os.getenv('HH_USER_AGENT', UA)},
         follow_redirects=False, params={
         'text': 'продуктовый аналитик OR коммерческий аналитик OR product analyst',
         'schedule': 'remote', 'per_page': 100, 'order_by': 'publication_time'})
