@@ -23,13 +23,13 @@ DB = DATA_DIR / 'vacancies.sqlite3'
 INTERVAL = max(6, int(os.getenv('SEARCH_INTERVAL_HOURS', '6')))
 ALLOWED_CHAT_ID = os.getenv('ALLOWED_CHAT_ID', '').strip()
 CACHE_SECONDS = 6 * 3600
-BATCH = 10
+BATCH = 15  # manual /check and /more; scheduled deliveries stay at 10
 lock = asyncio.Lock()
 dp = Dispatcher()
-PROFILE = ('Продуктовая, бизнес-, коммерческая, growth-, data- и игровая аналитика.\n'
+PROFILE = ('Широкий поиск: продуктовые, бизнес-, коммерческие, data/BI, маркетинговые,\n'\n           'финансовые, операционные, e-commerce, growth- и игровые аналитики.\n'
            'Формат: удалённо из любой страны. Русский рабочий язык в приоритете, '
            'английские вакансии тоже рассматриваются. Зарплата: ориентир 250–300 тыс. ₽ net.\n'
-           'Исключаю банки, системную аналитику, роли DWH/ETL в названии.\n'
+           'Исключаю банки, системную аналитику, DWH/ETL и инженерные роли.\n'
            'Часть вакансий может иметь ограничения по стране, языку и оплате — '
            'это нужно проверять перед откликом.')
 
@@ -64,7 +64,7 @@ def subscribed():
 async def catalogue():
     # Refresh cached errors immediately after credentials change, without storing tokens.
     board_signature = hashlib.sha256(Path(__file__).with_name('ats_boards.json').read_bytes()).hexdigest()
-    config = hashlib.sha256(('multi-source-v05:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss') + ':' + board_signature).encode()).hexdigest()
+    config = hashlib.sha256(('broad-analytics-v06:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss') + ':' + board_signature).encode()).hexdigest()
     with database() as db:
         row = db.execute('SELECT checked, payload FROM search_cache WHERE id=1').fetchone()
     if row:
@@ -118,7 +118,7 @@ def card(job):
             f'{excerpt}\n\nИсточник: {job.source}\n{job.url}')
 
 
-async def deliver(bot, chat_id, data):
+async def deliver(bot, chat_id, data, limit=None):
     if not allowed(chat_id):
         return 0, 0
     with database() as db:
@@ -126,7 +126,7 @@ async def deliver(bot, chat_id, data):
     jobs = sorted((Job(**j) for j in data['jobs']), key=rank, reverse=True)
     pending = [j for j in jobs if j.key not in seen]
     sent = 0
-    for job in pending[:BATCH]:
+    for job in pending[:(limit if limit is not None else BATCH)]:
         await bot.send_message(chat_id, card(job), disable_web_page_preview=True)
         with database() as db:
             db.execute('INSERT OR IGNORE INTO deliveries VALUES (?, ?)', (chat_id, job.key))
@@ -196,7 +196,7 @@ async def scheduled(bot):
         data = await catalogue()
         for chat_id in subscribed():
             try:
-                sent, remaining = await deliver(bot, chat_id, data)
+                sent, remaining = await deliver(bot, chat_id, data, limit=10)
                 errors = any(not s['ok'] for s in data['sources'].values())
                 if sent or errors:
                     await bot.send_message(chat_id, f'Плановая проверка: отправлено {sent}, осталось {remaining}.\n' + source_report(data))
