@@ -35,6 +35,34 @@ class Filters(unittest.TestCase):
         self.assertIsNone(salary_ceiling('от 200000 RUB до налогов'))
 
 
+    def test_broad_analyst_roles_are_included(self):
+        roles = [
+            'Аналитик', 'Аналитик по продажам', 'Финансовый аналитик',
+            'Маркетинговый аналитик', 'BI Analyst', 'Revenue Analyst',
+            'Operations Analyst', 'Growth Insights', 'Business Intelligence',
+            'Data Analyst', 'Game Analytics Analyst'
+        ]
+        for title in roles:
+            with self.subTest(title=title):
+                self.assertTrue(matches(replace(self.job, title=title, description='SQL, dashboards, metrics')),
+                                title)
+
+    def test_irrelevant_roles_still_excluded(self):
+        for title in ['Системный аналитик', 'Analytics Engineer',
+                      'Data Engineer', 'ETL Analyst', 'DWH Analyst']:
+            with self.subTest(title=title):
+                self.assertFalse(matches(replace(self.job, title=title)))
+        self.assertFalse(matches(replace(self.job, company='Большой Банк')))
+        self.assertFalse(matches(replace(self.job, salary='до 220 000 ₽')))
+        self.assertFalse(matches(replace(self.job, remote_scope='restricted')))
+        self.assertFalse(matches(replace(self.job, title='Project Manager')))
+
+    def test_recent_publication_ranking(self):
+        old = replace(self.job, published='Tue, 13 Oct 2026 12:00:00 +0300')
+        new = replace(self.job, published='Sun, 18 Oct 2026 12:00:00 +0300')
+        self.assertGreater(sources.rank(new), sources.rank(old))
+
+
 class Behavior(unittest.IsolatedAsyncioTestCase):
     async def test_hh_missing_token_does_not_request(self):
         client = AsyncMock()
@@ -99,6 +127,15 @@ class Behavior(unittest.IsolatedAsyncioTestCase):
         bot.send_message.side_effect = None
         self.assertEqual(await main.deliver(bot, 123, new_data), (1, 0))
 
+
+    async def test_manual_batch_size_is_fifteen(self):
+        bot = AsyncMock()
+        data = {'jobs': [asdict(replace(self.job, url=f'https://example.com/jobs/{i}')) for i in range(17)]}
+        with patch.object(main.asyncio, 'sleep', AsyncMock()):
+            sent, remainder = await main.deliver(bot, 123, data)
+        self.assertEqual((sent, remainder), (15, 2))
+        self.assertEqual(bot.send_message.await_count, 15)
+
     async def test_partial_source_failure(self):
         request = httpx.Request('GET', 'https://example.com')
         denied = httpx.HTTPStatusError('403', request=request, response=httpx.Response(403, request=request))
@@ -147,6 +184,40 @@ class Behavior(unittest.IsolatedAsyncioTestCase):
             with patch.dict(os.environ, {'HH_MODE': 'rss'}):
                 with self.assertRaisesRegex(sources.SourceUnavailable, 'HTTP 403'):
                     await sources.hh(client)
+
+
+    async def test_hh_rss_partial_failure_keeps_results(self):
+        seen = []
+        xml = ('<?xml version="1.0"?><rss><channel><item><title>Аналитик продаж</title>'
+               '<link>https://hh.ru/vacancy/987</link><description>SQL</description>'
+               '</item></channel></rss>').encode()
+        def handler(request):
+            term = request.url.params.get('text', '')
+            seen.append(term)
+            if term == 'аналитик':
+                return httpx.Response(403)
+            return httpx.Response(200, content=xml, headers={'content-type': 'application/rss+xml'})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch.dict(os.environ, {'HH_MODE': 'rss'}):
+                jobs = await sources.hh(client)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, 'Аналитик продаж')
+        self.assertGreaterEqual(len(seen), 10)
+
+    async def test_habr_rss_deduplicates_english_russian_queries(self):
+        xml = ('<?xml version="1.0"?><rss><channel><item><title>Data Analyst</title>'
+               '<link>https://career.habr.com/vacancies/987</link>'
+               '<description>Remote analytics SQL</description></item></channel></rss>').encode()
+        requests = []
+        def handler(request):
+            requests.append(request.url.params.get('q'))
+            return httpx.Response(200, content=xml)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            result = await sources.habr(client)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].title, 'Data Analyst')
+        self.assertIn('analyst', requests)
+        self.assertTrue(result[0].remote)
 
     async def test_remotive_job(self):
         payload = {'jobs': [{'title': 'Product Analyst', 'company_name': 'GameCo',
