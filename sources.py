@@ -1,19 +1,24 @@
 """Public vacancy sources. No login scraping or retries around access denials."""
 import asyncio
 import hashlib
+import logging
 import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
 
 UA = 'PersonalJobHunter/0.2 (+https://github.com/yamarc227-ai/telegram-job-hunter)'
-ROLE = re.compile(r'аналитик|аналитика|analyst|analytics', re.I)
+# Wide discovery: analyst roles in commercial, product, marketing, finance,
+# operations, e-commerce and gaming, including English-language job titles.
+ROLE = re.compile(r'аналитик|аналитическ|analyst|analytics|insights|business intelligence|data intelligence|исследователь данных', re.I)
 SPECIALTY = re.compile(r'продукт|коммерч|бизнес|данных|маркетинг|финанс|рост|монетиз|\bbi\b|product|commercial|business|\bdata\b|marketing|e-commerce|growth|revenue|game', re.I)
-EXCLUDED = re.compile(r'системн|system[s]? analyst|data engineer|etl|\bdwh\b|банк|\bbank\b|banking|1с|1c|битрикс|асутп|диасофт|full.?stack|фуллстек', re.I)
+EXCLUDED = re.compile(r'системн|system[s]? analyst|analytics? engineer|data engineer|etl|\bdwh\b|\bdata platform\b|\bdata architect\b|банк|\bbank\b|banking|1с|1c|битрикс|асутп|диасофт|full.?stack|фуллстек|\b(?:hr|people|talent|recruitment)\s+(?:analyst|analytics)\b', re.I)
 REMOTE = re.compile(r'удал[её]н|remote|любой точк[еи] мира', re.I)
 
 
@@ -64,7 +69,9 @@ def salary_ceiling(salary):
 
 
 def matches(job):
-    if not ROLE.search(job.title) or not SPECIALTY.search(job.title + ' ' + job.description[:600]) or EXCLUDED.search(job.title + ' ' + job.company):
+    # A generic "Аналитик" or "Data Analyst" is a valid candidate: earlier
+    # requiring specialty keywords dropped roles with short descriptions.
+    if not ROLE.search(job.title) or EXCLUDED.search(job.title + ' ' + job.company):
         return False
     if not job.remote or job.remote_scope == 'restricted':
         return False
@@ -72,9 +79,25 @@ def matches(job):
     return ceiling is None or ceiling >= 250000
 
 
+def published_timestamp(value):
+    if not value:
+        return 0.0
+    try:
+        return parsedate_to_datetime(str(value)).timestamp()
+    except (TypeError, ValueError, IndexError, OverflowError):
+        try:
+            return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+
 def rank(job):
-    return (job.remote_scope == 'worldwide', bool(re.search('продукт|коммерч|product|commercial|business|бизнес', job.title, re.I)),
-            salary_ceiling(job.salary) is not None, job.published)
+    # Sort by remote coverage, closest role to Ozon Fresh, stated salary,
+    # and recency. Keep worldwide scope as a signal, not as a guarantee.
+    preferred = bool(re.search(r'продукт|коммерч|product|commercial|business|бизнес|e-commerce|growth|игров', job.title, re.I))
+    adjacent = bool(SPECIALTY.search(job.title + ' ' + job.description[:350]))
+    return (job.remote_scope == 'worldwide', preferred, adjacent,
+            salary_ceiling(job.salary) is not None, published_timestamp(job.published))
 
 
 async def get(client, url, **kwargs):
@@ -194,33 +217,56 @@ async def hh_api(client):
 
 # HH exposes a search RSS endpoint. Its availability from servers is not
 # guaranteed; handle CAPTCHA/403 gracefully. No HTML scraping or evasion.
-HH_TERMS = ('продуктовый аналитик', 'бизнес аналитик', 'аналитик данных')
+HH_TERMS = (
+    'аналитик', 'продуктовый аналитик', 'бизнес аналитик', 'аналитик данных',
+    'коммерческий аналитик', 'маркетинговый аналитик', 'аналитик продаж',
+    'BI аналитик', 'финансовый аналитик', 'product analyst',
+    'growth analyst', 'аналитик маркетплейсов',
+)
 
 
 async def hh_rss(client):
     jobs = {}
+    successes = 0
+    first_error = None
+    # Use the official public RSS endpoint; a blocked search must not hide
+    # vacancies retrieved from other searches. Never retry CAPTCHA/403.
     for term in HH_TERMS:
-        r = await client.get('https://hh.ru/search/vacancy/rss',
-                             params={'text': term, 'schedule': 'remote',
-                                     'period': 14, 'order_by': 'publication_time'},
-                             follow_redirects=False)
-        if r.status_code in (401, 403, 429):
-            raise SourceUnavailable(f'HTTP {r.status_code}: hh RSS требует доступ/проверку')
-        r.raise_for_status()
-        if not r.content.lstrip().startswith(b'<?xml') and 'xml' not in r.headers.get('content-type', '').lower():
-            raise SourceUnavailable('hh RSS вернул не XML (возможно капча)')
-        root = ET.fromstring(r.content)
-        if root.tag != 'rss':
-            raise SourceUnavailable('hh RSS вернул неожиданный формат')
+        try:
+            r = await client.get('https://hh.ru/search/vacancy/rss',
+                                 params={'text': term, 'schedule': 'remote',
+                                         'period': 30, 'order_by': 'publication_time'},
+                                 follow_redirects=False)
+            if r.status_code in (401, 403, 429):
+                raise SourceUnavailable(f'HTTP {r.status_code}: hh RSS требует доступ/проверку')
+            r.raise_for_status()
+            if not r.content.lstrip().startswith(b'<?xml') and 'xml' not in r.headers.get('content-type', '').lower():
+                raise SourceUnavailable('hh RSS вернул не XML (возможно капча)')
+            root = ET.fromstring(r.content)
+            if root.tag != 'rss':
+                raise SourceUnavailable('hh RSS вернул неожиданный формат')
+        except (SourceUnavailable, httpx.HTTPError, ET.ParseError) as exc:
+            # Log only exception class/status, never response body or tokens.
+            reason = str(exc) if isinstance(exc, SourceUnavailable) else type(exc).__name__
+            first_error = first_error or reason
+            logging.warning('hh RSS unavailable for term %r: %s', term, reason)
+            continue
+        successes += 1
         for item in root.findall('.//item'):
             raw = item.findtext('title') or ''
             url = item.findtext('link') or ''
             if not url or not ROLE.search(raw):
                 continue
             title = raw.split(' - ', 1)[0]
-            jobs[url] = Job('hh.ru RSS', title, 'Уточнить', url,
-                            text(item.findtext('description') or title),
-                            published=item.findtext('pubDate') or '', remote=True)
+            job = Job('hh.ru RSS', title, 'Уточнить', url,
+                      text(item.findtext('description') or title),
+                      published=item.findtext('pubDate') or '', remote=True)
+            try:
+                jobs[job.key] = job
+            except ValueError:
+                continue
+    if not successes:
+        raise SourceUnavailable(first_error or 'hh RSS не дал ни одной корректной ленты')
     return list(jobs.values())
 
 
