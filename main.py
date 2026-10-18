@@ -26,12 +26,12 @@ CACHE_SECONDS = 6 * 3600
 BATCH = 10
 lock = asyncio.Lock()
 dp = Dispatcher()
-PROFILE = ('Продуктовая, коммерческая, бизнес- и data-аналитика. '
-           'Цель: полная удалёнка, русский рабочий язык, 250–300 тыс. ₽/мес.\n'
-           'Показываю кандидатов с признаком удалёнки и русским объявлением. '
-           'Зарплату без указанной вилки, налоги, язык команды и ограничения по стране нужно уточнять. '
-           'Известную верхнюю границу ниже 250 тыс. ₽ исключаю. '
-           'Зарплату выше 300 тыс. ₽ не исключаю.')
+PROFILE = ('Продуктовая, бизнес-, коммерческая, growth-, data- и игровая аналитика.\n'
+           'Формат: удалённо из любой страны. Русский рабочий язык в приоритете, '
+           'английские вакансии тоже рассматриваются. Зарплата: ориентир 250–300 тыс. ₽ net.\n'
+           'Исключаю банки, системную аналитику, роли DWH/ETL в названии.\n'
+           'Часть вакансий может иметь ограничения по стране, языку и оплате — '
+           'это нужно проверять перед откликом.')
 
 
 @contextmanager
@@ -63,7 +63,7 @@ def subscribed():
 
 async def catalogue():
     # Refresh cached errors immediately after credentials change, without storing tokens.
-    config = hashlib.sha256(('hh-auth-v1:' + os.getenv('HH_ACCESS_TOKEN', '').strip()).encode()).hexdigest()
+    config = hashlib.sha256(('multi-source-v03:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss')).encode()).hexdigest()
     with database() as db:
         row = db.execute('SELECT checked, payload FROM search_cache WHERE id=1').fetchone()
     if row:
@@ -91,11 +91,15 @@ def source_report(data):
 
 def card(job):
     excerpt = job.description[:650] + ('…' if len(job.description) > 650 else '')
+    remote = ('🌍 По описанию worldwide remote; уточнить исключения'
+              if job.remote_scope == 'worldwide'
+              else '🌍 Удалёнка есть; возможность работать из любой страны уточнить')
+    lang = ('Русское объявление; язык команды уточнить' if
+            len(__import__('re').findall('[а-яё]', job.description.lower())) >= 20
+            else 'Объявление на английском; уровень языка команды уточнить')
     return (f'💼 {job.title[:200]}\n🏢 {job.company[:150]}\n💰 {job.salary[:200]}\n'
-            '🌍 Есть признак удалёнки; полный remote и обязательные поездки уточнить\n'
-            f'📍 {job.location[:200]}\n'
-            '🗣 Объявление на русском; язык команды нужно подтвердить\n'
-            '📌 Кандидат для проверки условий, не подтверждённое совпадение\n\n'
+            f'{remote}\n📍 {job.location[:200]}\n🗣 {lang}\n'
+            '📌 Предварительно подходит по тематике, остальные условия не подтверждены\n\n'
             f'{excerpt}\n\nИсточник: {job.source}\n{job.url}')
 
 
