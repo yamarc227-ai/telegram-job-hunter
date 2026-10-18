@@ -17,6 +17,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from sources import Job, collect
 from scoring import classify, fit_sort_key, tier_counts, TIER_LABELS
+import career
+from bot_features import router as career_router, configure as configure_career, job_keyboard
 
 load_dotenv()
 DATA_DIR = Path(os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or Path(__file__).parent)
@@ -53,10 +55,14 @@ def init_db():
         db.execute('CREATE TABLE IF NOT EXISTS subscribers (chat_id INTEGER PRIMARY KEY)')
         db.execute('CREATE TABLE IF NOT EXISTS deliveries (chat_id INTEGER, job_key TEXT, PRIMARY KEY(chat_id, job_key))')
         db.execute('CREATE TABLE IF NOT EXISTS search_cache (id INTEGER PRIMARY KEY CHECK(id=1), checked REAL, payload TEXT)')
+        career.init_tables(db)
 
 
 def allowed(chat_id):
     return bool(ALLOWED_CHAT_ID) and str(chat_id) == ALLOWED_CHAT_ID
+
+
+configure_career(database, allowed)
 
 
 def subscribed():
@@ -67,7 +73,7 @@ def subscribed():
 async def catalogue():
     # Refresh cached errors immediately after credentials change, without storing tokens.
     board_signature = hashlib.sha256(Path(__file__).with_name('ats_boards.json').read_bytes()).hexdigest()
-    config = hashlib.sha256(('tier-scoring-v07:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss') + ':' + board_signature).encode()).hexdigest()
+    config = hashlib.sha256(('personal-career-v08:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss') + ':' + board_signature).encode()).hexdigest()
     with database() as db:
         row = db.execute('SELECT checked, payload FROM search_cache WHERE id=1').fetchone()
     if row:
@@ -130,11 +136,19 @@ async def deliver(bot, chat_id, data, limit=None):
         return 0, 0
     with database() as db:
         seen = {r[0] for r in db.execute('SELECT job_key FROM deliveries WHERE chat_id=?', (chat_id,))}
-    jobs = sorted((Job(**j) for j in data['jobs']), key=fit_sort_key, reverse=True)
-    pending = [j for j in jobs if j.key not in seen]
+        rejected = {key for key, vote in career.get_feedback(db, chat_id).items() if vote == 'dislike'}
+        jobs = [Job(**raw) for raw in data['jobs']]
+        def sort_for_user(job):
+            tier, score, quality = fit_sort_key(job)
+            return (tier, score + career.feedback_bonus(job, db, chat_id), quality)
+        jobs.sort(key=sort_for_user, reverse=True)
+    pending = [j for j in jobs if j.key not in seen and j.key not in rejected]
     sent = 0
     for job in pending[:(limit if limit is not None else BATCH)]:
-        await bot.send_message(chat_id, card(job), disable_web_page_preview=True)
+        with database() as db:
+            career.store_job(db, job)
+        await bot.send_message(chat_id, card(job), reply_markup=job_keyboard(job),
+                               disable_web_page_preview=True)
         with database() as db:
             db.execute('INSERT OR IGNORE INTO deliveries VALUES (?, ?)', (chat_id, job.key))
         sent += 1
@@ -150,6 +164,8 @@ async def start(message: Message):
         db.execute('INSERT OR IGNORE INTO subscribers VALUES (?)', (message.chat.id,))
     await message.answer('Подписка включена.\n/check — поиск сейчас\n/more — следующие вакансии\n'
                          '/sources — состояние источников\n/tiers — количество по категориям\n' 
+                         '/applications — трекер откликов\n/resume — загрузить резюме\n' 
+                         '/ai_on и /ai_off — управление AI\n' 
                          '/profile — условия поиска\n/stop — отключить рассылку\n\n' + PROFILE)
 
 
@@ -224,6 +240,9 @@ async def scheduled(bot):
                     await bot.send_message(chat_id, f'Плановая проверка: отправлено {sent}, осталось {remaining}.\n' + source_report(data))
             except Exception as exc:
                 logging.error('Scheduled delivery failed: %s', type(exc).__name__)
+
+
+dp.include_router(career_router)
 
 
 async def main():
