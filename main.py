@@ -15,7 +15,8 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from sources import Job, collect, rank
+from sources import Job, collect
+from scoring import classify, fit_sort_key, tier_counts, TIER_LABELS
 
 load_dotenv()
 DATA_DIR = Path(os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or Path(__file__).parent)
@@ -26,7 +27,8 @@ CACHE_SECONDS = 6 * 3600
 BATCH = 15  # manual /check and /more; scheduled deliveries stay at 10
 lock = asyncio.Lock()
 dp = Dispatcher()
-PROFILE = ('Широкий поиск: продуктовая, бизнес-, коммерческая, data/BI, маркетинговая,\n'
+PROFILE = ('Три категории по задачам: 🎯 идеально подходят, 🔎 стоит рассмотреть, 🧩 смежная аналитика.\n'
+           'Широкий поиск: продуктовая, бизнес-, коммерческая, data/BI, маркетинговая,\n'
            'финансовая, операционная, e-commerce, growth- и игровая аналитика.\n'
            'Формат: удалённо из любой страны. Русский рабочий язык в приоритете, '
            'английские вакансии тоже рассматриваются. Зарплата: ориентир 250–300 тыс. ₽ net.\n'
@@ -65,7 +67,7 @@ def subscribed():
 async def catalogue():
     # Refresh cached errors immediately after credentials change, without storing tokens.
     board_signature = hashlib.sha256(Path(__file__).with_name('ats_boards.json').read_bytes()).hexdigest()
-    config = hashlib.sha256(('broad-analytics-v06:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss') + ':' + board_signature).encode()).hexdigest()
+    config = hashlib.sha256(('tier-scoring-v07:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss') + ':' + board_signature).encode()).hexdigest()
     with database() as db:
         row = db.execute('SELECT checked, payload FROM search_cache WHERE id=1').fetchone()
     if row:
@@ -107,15 +109,19 @@ def source_report(data):
 
 def card(job):
     excerpt = job.description[:650] + ('…' if len(job.description) > 650 else '')
+    fit = classify(job)
     remote = ('🌍 По описанию worldwide remote; уточнить исключения'
               if job.remote_scope == 'worldwide'
               else '🌍 Удалёнка есть; возможность работать из любой страны уточнить')
     lang = ('Русское объявление; язык команды уточнить' if
             len(__import__('re').findall('[а-яё]', job.description.lower())) >= 20
             else 'Объявление на английском; уровень языка команды уточнить')
-    return (f'💼 {job.title[:200]}\n🏢 {job.company[:150]}\n💰 {job.salary[:200]}\n'
+    why = '; '.join(fit.reasons[:3])
+    return (f'{fit.label} · {fit.score}/100 по задачам\n'
+            f'💼 {job.title[:200]}\n🏢 {job.company[:150]}\n💰 {job.salary[:200]}\n'
             f'{remote}\n📍 {job.location[:200]}\n🗣 {lang}\n'
-            '📌 Предварительно подходит по тематике, остальные условия не подтверждены\n\n'
+            f'🔍 Почему: {why}\n'
+            '📌 Предварительная оценка: опыт, географию, язык и net/gross уточнить\n\n'
             f'{excerpt}\n\nИсточник: {job.source}\n{job.url}')
 
 
@@ -124,7 +130,7 @@ async def deliver(bot, chat_id, data, limit=None):
         return 0, 0
     with database() as db:
         seen = {r[0] for r in db.execute('SELECT job_key FROM deliveries WHERE chat_id=?', (chat_id,))}
-    jobs = sorted((Job(**j) for j in data['jobs']), key=rank, reverse=True)
+    jobs = sorted((Job(**j) for j in data['jobs']), key=fit_sort_key, reverse=True)
     pending = [j for j in jobs if j.key not in seen]
     sent = 0
     for job in pending[:(limit if limit is not None else BATCH)]:
@@ -143,7 +149,8 @@ async def start(message: Message):
     with database() as db:
         db.execute('INSERT OR IGNORE INTO subscribers VALUES (?)', (message.chat.id,))
     await message.answer('Подписка включена.\n/check — поиск сейчас\n/more — следующие вакансии\n'
-                         '/sources — состояние источников\n/profile — условия поиска\n/stop — отключить рассылку\n\n' + PROFILE)
+                         '/sources — состояние источников\n/tiers — количество по категориям\n' 
+                         '/profile — условия поиска\n/stop — отключить рассылку\n\n' + PROFILE)
 
 
 @dp.message(Command('profile'))
@@ -166,6 +173,20 @@ async def sources(message: Message):
         async with lock:
             data = await catalogue()
         await message.answer(source_report(data))
+
+
+@dp.message(Command('tiers'))
+async def tiers(message: Message):
+    if not allowed(message.chat.id):
+        return
+    async with lock:
+        data = await catalogue()
+    counts = tier_counts(Job(**raw) for raw in data['jobs'])
+    lines = ['Подборка по совпадению задач (уникальные вакансии):']
+    lines.extend(f"{TIER_LABELS[tier]}: {counts[tier]}" for tier in ('ideal', 'consider', 'adjacent'))
+    lines.append(f"Всего: {sum(counts.values())}")
+    lines.append('Оценка по тексту вакансий, а не прогноз оффера. Географию, опыт, язык команды и net/gross уточнять.')
+    await message.answer('\n'.join(lines))
 
 
 @dp.message(Command('check', 'more'))
