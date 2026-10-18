@@ -99,7 +99,8 @@ class Behavior(unittest.IsolatedAsyncioTestCase):
         denied = httpx.HTTPStatusError('403', request=request, response=httpx.Response(403, request=request))
         providers = {'Good': AsyncMock(return_value=[self.job]), 'Blocked': AsyncMock(side_effect=denied)}
         with patch.dict(sources.PROVIDERS, providers, clear=True):
-            jobs, statuses = await sources.collect()
+            with patch('boards.collect_boards', AsyncMock(return_value=([], {}))):
+                jobs, statuses = await sources.collect()
         self.assertEqual(len(jobs), 1)
         self.assertTrue(statuses['Good']['ok'])
         self.assertEqual(statuses['Blocked']['error'], 'HTTP 403')
@@ -153,6 +154,59 @@ class Behavior(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(matches(results[0]))
         self.assertEqual(results[0].remote_scope, 'worldwide')
+
+
+class BoardParser(unittest.TestCase):
+    def test_ashby_onsite_excluded(self):
+        import boards
+        rows = {'jobs': [
+            {'title': 'Product Analyst', 'jobUrl': 'https://jobs.ashbyhq.com/higgsfieldai/test',
+             'location': 'Almaty, Kazakhstan', 'workplaceType': 'OnSite',
+             'isRemote': False, 'descriptionPlain': 'Product metrics and cohorts'},
+            {'title': 'Product Analyst', 'jobUrl': 'https://jobs.ashbyhq.com/higgsfieldai/remote',
+             'location': 'Global (Remote)', 'workplaceType': 'Remote',
+             'isRemote': True, 'descriptionPlain': 'Product metrics and cohorts'},
+        ]}
+        result = boards.parse_ashby('Higgsfield AI', rows)
+        self.assertEqual(len(result), 2)
+        self.assertFalse(matches(result[0]))
+        self.assertTrue(matches(result[1]))
+
+    def test_lever_onsite_excluded(self):
+        import boards
+        data = [
+            {'text': 'Product Analyst', 'hostedUrl': 'https://jobs.lever.co/test/1',
+             'categories': {'location': 'New York'}, 'workplaceType': 'on-site',
+             'descriptionPlain': 'Product analysis'},
+            {'text': 'Product Analyst', 'hostedUrl': 'https://jobs.lever.co/test/2',
+             'categories': {'location': 'Remote'}, 'workplaceType': 'remote',
+             'descriptionPlain': 'Product analysis'},
+        ]
+        jobs = boards.parse_lever('Example', data)
+        self.assertEqual(len(jobs), 2)
+        self.assertFalse(matches(jobs[0]))
+        self.assertTrue(matches(jobs[1]))
+
+    def test_greenhouse_without_remote_claim_excluded(self):
+        import boards
+        rows = {'jobs': [
+            {'title': 'Business Analyst', 'absolute_url': 'https://boards.greenhouse.io/test/1',
+             'location': {'name': 'London'}, 'content': 'Product metrics and customers'},
+            {'title': 'Business Analyst (Remote)', 'absolute_url': 'https://boards.greenhouse.io/test/2',
+             'location': {'name': 'Remote'}, 'content': 'Product metrics and customers'},
+        ]}
+        jobs = boards.parse_greenhouse('Example', rows)
+        self.assertEqual(len(jobs), 2)
+        self.assertFalse(matches(jobs[0]))
+        self.assertTrue(matches(jobs[1]))
+
+    def test_board_list_has_42_distinct_entries(self):
+        import json
+        import boards
+        entries = json.loads(boards.BOARDS_FILE.read_text())
+        self.assertEqual(len(entries), 42)
+        self.assertEqual(len({(entry['ats'], entry['slug']) for entry in entries}), 42)
+        self.assertIn(('ashby', 'higgsfieldai'), {(x['ats'], x['slug']) for x in entries})
 
 
 if __name__ == '__main__':
