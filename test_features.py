@@ -3,6 +3,12 @@
 No Telegram credentials or external API requests are required to run these.
 """
 import io
+import os
+import tempfile
+from pathlib import Path
+from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 import sqlite3
 import unittest
 from dataclasses import replace
@@ -113,6 +119,85 @@ class PrivateCareerData(unittest.TestCase):
         self.assertEqual(ai_service.response_text(response), "Готовый результат")
         with self.assertRaises(RuntimeError):
             ai_service.response_text({"output": []})
+
+
+class TelegramActions(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp.name) / "test.sqlite3"
+        @contextmanager
+        def database():
+            db = sqlite3.connect(self.db_path)
+            try:
+                with db:
+                    yield db
+            finally:
+                db.close()
+        self.db = database
+        bot_features.configure(self.db, lambda chat_id: chat_id == 12345)
+        self.job = Job("HH", "Product Analyst", "Example",
+                       "https://example.com/jobs/223", "SQL, Python, retention",
+                       remote=True)
+        with self.db() as conn:
+            career.init_tables(conn)
+            career.store_job(conn, self.job)
+        self.message = SimpleNamespace(chat=SimpleNamespace(id=12345),
+                                       answer=AsyncMock(), answer_document=AsyncMock())
+
+    async def asyncTearDown(self):
+        self.temp.cleanup()
+
+    def callback(self, action, chat_id=12345):
+        message = SimpleNamespace(chat=SimpleNamespace(id=chat_id),
+                                  answer=AsyncMock(), answer_document=AsyncMock())
+        return SimpleNamespace(message=message, data=f"jh:{action}:{self.job.key[:16]}",
+                               answer=AsyncMock())
+
+    async def test_buttons_store_like_and_application(self):
+        q = self.callback("like")
+        await bot_features.vacancy_action(q)
+        q.answer.assert_awaited_once()
+        with self.db() as conn:
+            self.assertEqual(career.get_feedback(conn, 12345)[self.job.key], "like")
+        q = self.callback("interview")
+        await bot_features.vacancy_action(q)
+        with self.db() as conn:
+            self.assertEqual(career.get_applications(conn, 12345)[0][1], "interview")
+
+    async def test_chat_authentication_applies_to_buttons(self):
+        q = self.callback("like", chat_id=99999)
+        await bot_features.vacancy_action(q)
+        with self.db() as conn:
+            self.assertEqual(career.get_feedback(conn, 12345), {})
+
+    async def test_no_ai_call_without_key_and_consent(self):
+        resume = ("Работал аналитиком, использовал SQL и Excel, "
+                  "занимался отчётностью и продуктовой аналитикой. " * 3)
+        with self.db() as conn:
+            career.resume_save(conn, 12345, "resume.txt", resume)
+            career.consent_set(conn, 12345, False)
+        q = self.callback("review")
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            with patch.object(ai_service, "generate", AsyncMock(side_effect=AssertionError("AI called"))):
+                await bot_features.vacancy_action(q)
+        self.assertGreaterEqual(q.message.answer.await_count, 1)
+        self.assertIn("SQL", str(q.message.answer.await_args.args[0]))
+
+    async def test_upload_resume_and_forget(self):
+        candidate = ("Я аналитик, работаю с SQL и Python. "
+                     "Изучаю пользовательские метрики и делаю отчёты. " * 3)
+        async def fake_download(document, destination):
+            destination.write(candidate.encode("utf-8"))
+        msg = SimpleNamespace(chat=SimpleNamespace(id=12345),
+                              document=SimpleNamespace(file_name="sample.txt", file_size=500),
+                              bot=SimpleNamespace(download=AsyncMock(side_effect=fake_download)),
+                              answer=AsyncMock())
+        await bot_features.upload_resume(msg)
+        with self.db() as conn:
+            self.assertIsNotNone(career.resume_get(conn, 12345))
+        await bot_features.resume_forget(msg)
+        with self.db() as conn:
+            self.assertIsNone(career.resume_get(conn, 12345))
 
 
 if __name__ == "__main__":
