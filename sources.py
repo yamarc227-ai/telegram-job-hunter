@@ -1,6 +1,7 @@
 """Public vacancy sources. No login scraping or retries around access denials."""
 import asyncio
 import hashlib
+import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
@@ -147,10 +148,30 @@ async def geekjob(client):
     return list(jobs.values())
 
 
+class SourceUnavailable(Exception):
+    """Safe, user-facing source status; never contains response bodies or tokens."""
+
+
 async def hh(client):
-    response = await get(client, 'https://api.hh.ru/vacancies', params={
+    token = os.getenv('HH_ACCESS_TOKEN', '').strip()
+    if not token:
+        raise SourceUnavailable('не настроен HH_ACCESS_TOKEN в Railway')
+    # Scope credentials to this request, never to the shared multi-source client.
+    response = await client.get('https://api.hh.ru/vacancies',
+        headers={'Authorization': f'Bearer {token}', 'HH-User-Agent': UA},
+        follow_redirects=False, params={
         'text': 'продуктовый аналитик OR коммерческий аналитик OR product analyst',
         'schedule': 'remote', 'per_page': 100, 'order_by': 'publication_time'})
+    if response.status_code in (401, 403):
+        try:
+            errors = response.json().get('errors', [])
+        except (ValueError, AttributeError):
+            errors = []
+        values = {e.get('value') for e in errors if isinstance(e, dict)} if isinstance(errors, list) else set()
+        if values & {'token_expired', 'token_revoked', 'bad_authorization'}:
+            raise SourceUnavailable('токен hh недействителен; обнови HH_ACCESS_TOKEN в Railway')
+        raise SourceUnavailable(f'HTTP {response.status_code}: hh отклонил доступ; проверь права приложения и токен')
+    response.raise_for_status()
     data = response.json()
     if not isinstance(data.get('items'), list):
         raise ValueError('Неверная структура ответа hh.ru')
@@ -181,7 +202,9 @@ async def collect():
     jobs, statuses = {}, {}
     for name, result in zip(PROVIDERS, results):
         if isinstance(result, Exception):
-            if isinstance(result, httpx.HTTPStatusError):
+            if isinstance(result, SourceUnavailable):
+                error = str(result)
+            elif isinstance(result, httpx.HTTPStatusError):
                 error = f'HTTP {result.response.status_code}'
             else:
                 error = type(result).__name__

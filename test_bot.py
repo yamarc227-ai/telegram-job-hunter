@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import unittest
 from dataclasses import asdict, replace
@@ -30,6 +31,42 @@ class Filters(unittest.TestCase):
 
 
 class Behavior(unittest.IsolatedAsyncioTestCase):
+    async def test_hh_missing_token_does_not_request(self):
+        client = AsyncMock()
+        with patch.dict(os.environ, {'HH_ACCESS_TOKEN': ''}):
+            with self.assertRaisesRegex(sources.SourceUnavailable, 'HH_ACCESS_TOKEN'):
+                await sources.hh(client)
+        client.get.assert_not_awaited()
+
+    async def test_hh_token_is_scoped_and_errors_are_safe(self):
+        requests = []
+        def handler(request):
+            requests.append(request)
+            if request.url.host == 'api.hh.ru':
+                self.assertEqual(request.headers['Authorization'], 'Bearer test-secret')
+                return httpx.Response(200, json={'items': []})
+            self.assertNotIn('Authorization', request.headers)
+            return httpx.Response(200)
+        with patch.dict(os.environ, {'HH_ACCESS_TOKEN': 'test-secret'}):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                self.assertEqual(await sources.hh(client), [])
+                await client.get('https://example.com')
+            async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda r: httpx.Response(403, json={'errors': [{'value': 'token_expired'}], 'secret': 'test-secret'})
+            )) as client:
+                with self.assertRaisesRegex(sources.SourceUnavailable, 'недействителен') as caught:
+                    await sources.hh(client)
+                self.assertNotIn('test-secret', str(caught.exception))
+
+    async def test_credentials_change_refreshes_cache(self):
+        result = ([], {'Test': {'ok': True, 'total': 0, 'matched': 0}})
+        with patch.object(main, 'collect', AsyncMock(return_value=result)) as collect:
+            with patch.dict(os.environ, {'HH_ACCESS_TOKEN': ''}):
+                await main.catalogue()
+            with patch.dict(os.environ, {'HH_ACCESS_TOKEN': 'new-test-token'}):
+                await main.catalogue()
+            self.assertEqual(collect.await_count, 2)
+
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old = main.DB, main.DATA_DIR, main.ALLOWED_CHAT_ID

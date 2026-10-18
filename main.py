@@ -1,6 +1,7 @@
 """Personal multi-source vacancy monitor."""
 import asyncio
 import json
+import hashlib
 import logging
 import os
 import sqlite3
@@ -61,15 +62,17 @@ def subscribed():
 
 
 async def catalogue():
+    # Refresh cached errors immediately after credentials change, without storing tokens.
+    config = hashlib.sha256(('hh-auth-v1:' + os.getenv('HH_ACCESS_TOKEN', '').strip()).encode()).hexdigest()
     with database() as db:
         row = db.execute('SELECT checked, payload FROM search_cache WHERE id=1').fetchone()
     if row:
         data = json.loads(row[1])
         ttl = CACHE_SECONDS if any(s['ok'] for s in data['sources'].values()) else 900
-        if time.time() - row[0] < ttl:
+        if data.get('config') == config and time.time() - row[0] < ttl:
             return data
     jobs, statuses = await collect()
-    data = {'jobs': jobs, 'sources': statuses, 'checked': time.time()}
+    data = {'jobs': jobs, 'sources': statuses, 'checked': time.time(), 'config': config}
     with database() as db:
         db.execute('INSERT OR REPLACE INTO search_cache VALUES (1, ?, ?)', (data['checked'], json.dumps(data)))
     logging.info('Search completed: %s', json.dumps(statuses, ensure_ascii=False))
