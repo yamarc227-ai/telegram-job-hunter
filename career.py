@@ -160,17 +160,29 @@ def parse_resume(filename, file_bytes):
     if ext == "txt":
         content = file_bytes.decode("utf-8-sig")
     elif ext == "docx":
-        doc = Document(io.BytesIO(file_bytes))
-        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                paragraphs.append(" | ".join(cell.text for cell in row.cells))
-        content = "\n".join(paragraphs)
+        if not file_bytes.startswith(b"PK"):
+            raise ValueError("Некорректный DOCX-файл")
+        try:
+            doc = Document(io.BytesIO(file_bytes))
+            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    paragraphs.append(" | ".join(cell.text for cell in row.cells))
+            content = "\n".join(paragraphs)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError("Не удалось прочитать DOCX-файл") from None
     elif ext == "pdf":
-        reader = PdfReader(io.BytesIO(file_bytes), strict=False)
-        if len(reader.pages) > 12:
-            raise ValueError("Резюме: максимум 12 страниц")
-        content = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if not file_bytes.startswith(b"%PDF-"):
+            raise ValueError("Некорректный PDF-файл")
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes), strict=False)
+            if len(reader.pages) > 12:
+                raise ValueError("Резюме: максимум 12 страниц")
+            content = "\n".join(page.extract_text() or "" for page in reader.pages)
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError("Повреждённый или защищённый PDF-файл") from None
     else:
         raise ValueError("Пришли резюме .pdf, .docx или .txt")
     content = "\n".join(line.strip() for line in content.splitlines() if line.strip())
