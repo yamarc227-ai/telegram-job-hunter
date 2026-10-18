@@ -24,7 +24,7 @@ class Filters(unittest.TestCase):
         self.assertTrue(matches(replace(self.job, salary='Не указана')))
         self.assertFalse(matches(replace(self.job, title='Системный аналитик')))
         self.assertFalse(matches(replace(self.job, remote=False)))
-        self.assertFalse(matches(replace(self.job, description='English-speaking team only')))
+        self.assertTrue(matches(replace(self.job, description='English-speaking team only')))
         self.assertEqual(salary_ceiling('от 250 000 до 270 000 ₽'), 270000)
         self.assertEqual(salary_ceiling('250K — 300K ₽'), 300000)
         self.assertIsNone(salary_ceiling('от 200000 RUB до налогов'))
@@ -33,7 +33,7 @@ class Filters(unittest.TestCase):
 class Behavior(unittest.IsolatedAsyncioTestCase):
     async def test_hh_missing_token_does_not_request(self):
         client = AsyncMock()
-        with patch.dict(os.environ, {'HH_ACCESS_TOKEN': ''}):
+        with patch.dict(os.environ, {'HH_ACCESS_TOKEN': '', 'HH_MODE': 'api'}):
             with self.assertRaisesRegex(sources.SourceUnavailable, 'HH_ACCESS_TOKEN'):
                 await sources.hh(client)
         client.get.assert_not_awaited()
@@ -47,7 +47,7 @@ class Behavior(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={'items': []})
             self.assertNotIn('Authorization', request.headers)
             return httpx.Response(200)
-        with patch.dict(os.environ, {'HH_ACCESS_TOKEN': 'test-secret'}):
+        with patch.dict(os.environ, {'HH_ACCESS_TOKEN': 'test-secret', 'HH_MODE': 'api'}):
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
                 self.assertEqual(await sources.hh(client), [])
                 await client.get('https://example.com')
@@ -119,6 +119,40 @@ class Behavior(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, 'catalogue', AsyncMock(return_value=data)):
             await main.check(message)
         self.assertIn('Поиск не выполнен', message.answer.call_args.args[0])
+
+
+    async def test_hh_rss_without_token(self):
+        content = ('<?xml version="1.0"?><rss><channel><item><title>Продуктовый аналитик</title>'
+                   '<link>https://hh.ru/vacancy/123</link>'
+                   '<description>Пользователи, SQL и продуктовые метрики</description>'
+                   '</item></channel></rss>').encode('utf-8')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, content=content, headers={'content-type': 'application/rss+xml'})
+        )) as client:
+            with patch.dict(os.environ, {'HH_MODE': 'rss', 'HH_ACCESS_TOKEN': ''}):
+                items = await sources.hh(client)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].source, 'hh.ru RSS')
+
+    async def test_hh_rss_denial_without_leaking(self):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda r: httpx.Response(403, text='captcha')
+        )) as client:
+            with patch.dict(os.environ, {'HH_MODE': 'rss'}):
+                with self.assertRaisesRegex(sources.SourceUnavailable, 'HTTP 403'):
+                    await sources.hh(client)
+
+    async def test_remotive_job(self):
+        payload = {'jobs': [{'title': 'Product Analyst', 'company_name': 'GameCo',
+                   'url': 'https://remotive.com/job/123', 'description': 'product metrics',
+                   'candidate_required_location': 'Worldwide', 'publication_date': ''}]}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json=payload)
+        )) as client:
+            results = await sources.remotive(client)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(matches(results[0]))
+        self.assertEqual(results[0].remote_scope, 'worldwide')
 
 
 if __name__ == '__main__':
