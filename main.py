@@ -1,123 +1,203 @@
-"""Personal job hunter: Telegram delivery and HeadHunter API search."""
+"""Personal multi-source vacancy monitor."""
 import asyncio
+import json
 import logging
 import os
 import sqlite3
+import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from contextlib import contextmanager
 
-import httpx
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
+from sources import Job, collect, rank
 
 load_dotenv()
-TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
-ALLOWED_CHAT_ID = os.getenv('ALLOWED_CHAT_ID', '').strip()
-INTERVAL = max(1, int(os.getenv('SEARCH_INTERVAL_HOURS', '6')))
 DATA_DIR = Path(os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or Path(__file__).parent)
 DB = DATA_DIR / 'vacancies.sqlite3'
-TERMS = ['продуктовый аналитик', 'коммерческий аналитик', 'бизнес аналитик e-commerce', 'product analyst']
-EXCLUDE = ['банк', 'banking', 'dwh engineer', 'data engineer', 'etl developer', 'системный аналитик']
-
-bot = Bot(TOKEN)
+INTERVAL = max(6, int(os.getenv('SEARCH_INTERVAL_HOURS', '6')))
+ALLOWED_CHAT_ID = os.getenv('ALLOWED_CHAT_ID', '').strip()
+CACHE_SECONDS = 6 * 3600
+BATCH = 10
+lock = asyncio.Lock()
 dp = Dispatcher()
+PROFILE = ('Продуктовая, коммерческая, бизнес- и data-аналитика. '
+           'Цель: полная удалёнка, русский рабочий язык, 250–300 тыс. ₽/мес.\n'
+           'Показываю кандидатов с признаком удалёнки и русским объявлением. '
+           'Зарплату без указанной вилки, налоги, язык команды и ограничения по стране нужно уточнять. '
+           'Известную верхнюю границу ниже 250 тыс. ₽ исключаю. '
+           'Зарплату выше 300 тыс. ₽ не исключаю.')
+
+
+@contextmanager
+def database():
+    db = sqlite3.connect(DB)
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB) as db:
-        db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)')
+    with database() as db:
         db.execute('CREATE TABLE IF NOT EXISTS subscribers (chat_id INTEGER PRIMARY KEY)')
+        db.execute('CREATE TABLE IF NOT EXISTS deliveries (chat_id INTEGER, job_key TEXT, PRIMARY KEY(chat_id, job_key))')
+        db.execute('CREATE TABLE IF NOT EXISTS search_cache (id INTEGER PRIMARY KEY CHECK(id=1), checked REAL, payload TEXT)')
 
 
-def subscribers():
-    with sqlite3.connect(DB) as db:
-        return [row[0] for row in db.execute('SELECT chat_id FROM subscribers')]
+def allowed(chat_id):
+    return bool(ALLOWED_CHAT_ID) and str(chat_id) == ALLOWED_CHAT_ID
 
 
-def is_allowed(chat_id: int) -> bool:
-    return not ALLOWED_CHAT_ID or str(chat_id) == ALLOWED_CHAT_ID
+def subscribed():
+    with database() as db:
+        return [r[0] for r in db.execute('SELECT chat_id FROM subscribers') if allowed(r[0])]
+
+
+async def catalogue():
+    with database() as db:
+        row = db.execute('SELECT checked, payload FROM search_cache WHERE id=1').fetchone()
+    if row:
+        data = json.loads(row[1])
+        ttl = CACHE_SECONDS if any(s['ok'] for s in data['sources'].values()) else 900
+        if time.time() - row[0] < ttl:
+            return data
+    jobs, statuses = await collect()
+    data = {'jobs': jobs, 'sources': statuses, 'checked': time.time()}
+    with database() as db:
+        db.execute('INSERT OR REPLACE INTO search_cache VALUES (1, ?, ?)', (data['checked'], json.dumps(data)))
+    logging.info('Search completed: %s', json.dumps(statuses, ensure_ascii=False))
+    return data
+
+
+def source_report(data):
+    when = datetime.fromtimestamp(data['checked'], timezone(timedelta(hours=3))).strftime('%d.%m %H:%M МСК')
+    lines = [f'Источники — проверка {when}:']
+    for name, s in data['sources'].items():
+        lines.append(f"{name}: получено {s['total']}, кандидатов {s['matched']}" if s['ok']
+                     else f"{name}: недоступен ({s['error']})")
+    lines.append('Данные обновляются раз в 6 часов; повторный /check использует сохранённую подборку.')
+    return '\n'.join(lines)
+
+
+def card(job):
+    excerpt = job.description[:650] + ('…' if len(job.description) > 650 else '')
+    return (f'💼 {job.title[:200]}\n🏢 {job.company[:150]}\n💰 {job.salary[:200]}\n'
+            '🌍 Есть признак удалёнки; полный remote и обязательные поездки уточнить\n'
+            f'📍 {job.location[:200]}\n'
+            '🗣 Объявление на русском; язык команды нужно подтвердить\n'
+            '📌 Кандидат для проверки условий, не подтверждённое совпадение\n\n'
+            f'{excerpt}\n\nИсточник: {job.source}\n{job.url}')
+
+
+async def deliver(bot, chat_id, data):
+    if not allowed(chat_id):
+        return 0, 0
+    with database() as db:
+        seen = {r[0] for r in db.execute('SELECT job_key FROM deliveries WHERE chat_id=?', (chat_id,))}
+    jobs = sorted((Job(**j) for j in data['jobs']), key=rank, reverse=True)
+    pending = [j for j in jobs if j.key not in seen]
+    sent = 0
+    for job in pending[:BATCH]:
+        await bot.send_message(chat_id, card(job), disable_web_page_preview=True)
+        with database() as db:
+            db.execute('INSERT OR IGNORE INTO deliveries VALUES (?, ?)', (chat_id, job.key))
+        sent += 1
+        await asyncio.sleep(0.1)
+    return sent, len(pending) - sent
 
 
 @dp.message(Command('start'))
 async def start(message: Message):
-    if not is_allowed(message.chat.id):
+    if not allowed(message.chat.id):
         return
-    with sqlite3.connect(DB) as db:
+    with database() as db:
         db.execute('INSERT OR IGNORE INTO subscribers VALUES (?)', (message.chat.id,))
-    await message.answer('Привет! Я ищу вакансии продуктового и коммерческого аналитика. /check — проверить сейчас; /stop — отключить рассылку.\nТвой chat_id: ' + str(message.chat.id))
+    await message.answer('Подписка включена.\n/check — поиск сейчас\n/more — следующие вакансии\n'
+                         '/sources — состояние источников\n/profile — условия поиска\n/stop — отключить рассылку\n\n' + PROFILE)
+
+
+@dp.message(Command('profile'))
+async def profile(message: Message):
+    if allowed(message.chat.id):
+        await message.answer(PROFILE)
 
 
 @dp.message(Command('stop'))
 async def stop(message: Message):
-    with sqlite3.connect(DB) as db:
-        db.execute('DELETE FROM subscribers WHERE chat_id = ?', (message.chat.id,))
-    await message.answer('Рассылка отключена.')
+    if allowed(message.chat.id):
+        with database() as db:
+            db.execute('DELETE FROM subscribers WHERE chat_id=?', (message.chat.id,))
+        await message.answer('Рассылка отключена. /start — включить снова.')
 
 
-@dp.message(Command('check'))
+@dp.message(Command('sources'))
+async def sources(message: Message):
+    if allowed(message.chat.id):
+        async with lock:
+            data = await catalogue()
+        await message.answer(source_report(data))
+
+
+@dp.message(Command('check', 'more'))
 async def check(message: Message):
-    if not is_allowed(message.chat.id):
+    if not allowed(message.chat.id):
         return
-    count = await scan(targets=[message.chat.id])
-    await message.answer(f'Проверка завершена. Новых подходящих кандидатов: {count}.')
+    if lock.locked():
+        await message.answer('Проверка уже идёт. Дождись результата.')
+        return
+    await message.answer('Проверяю подборку по нескольким источникам…')
+    async with lock:
+        data = await catalogue()
+        if not any(s['ok'] for s in data['sources'].values()):
+            await message.answer('Поиск не выполнен: все источники недоступны. Это не означает, что вакансий нет.\n' + source_report(data))
+            return
+        try:
+            sent, remaining = await deliver(message.bot, message.chat.id, data)
+        except Exception as exc:
+            logging.error('Manual delivery failed: %s', type(exc).__name__)
+            await message.answer('Не удалось отправить всю подборку. Уже отправленное сохранено; повтори /check позже.')
+            return
+    await message.answer(f'Отправлено новых вакансий-кандидатов: {sent}. Осталось: {remaining}.'
+                         + (' /more — показать ещё.' if remaining else '')
+                         + '\nПри нуле новые кандидаты не найдены или уже отправлены.\n' + source_report(data))
 
 
-async def scan(targets=None):
-    """Heuristic discovery, NOT verified worldwide-remote or salary eligibility."""
-    targets = subscribers() if targets is None else targets
-    if not targets:
-        return 0
-    found = {}
-    async with httpx.AsyncClient(timeout=25, headers={'User-Agent': 'PersonalJobHunter/0.1 (Telegram personal use)'}) as client:
-        for term in TERMS:
+async def scheduled(bot):
+    async with lock:
+        data = await catalogue()
+        for chat_id in subscribed():
             try:
-                response = await client.get('https://api.hh.ru/vacancies', params={'text': term, 'schedule': 'remote', 'per_page': 30, 'order_by': 'publication_time'})
-                response.raise_for_status()
-                for item in response.json().get('items', []):
-                    title = item.get('name', '')
-                    employer = (item.get('employer') or {}).get('name', '')
-                    haystack = f'{title} {employer}'.lower()
-                    if any(term in haystack for term in EXCLUDE):
-                        continue
-                    found[str(item['id'])] = item
-            except (httpx.HTTPError, ValueError, KeyError):
-                logging.exception('Failed query: %s', term)
-    sent = 0
-    with sqlite3.connect(DB) as db:
-        for vacancy_id, item in found.items():
-            if db.execute('SELECT 1 FROM seen WHERE id = ?', (vacancy_id,)).fetchone():
-                continue
-            title = item.get('name', 'Вакансия')
-            employer = (item.get('employer') or {}).get('name', 'Не указана')
-            salary = item.get('salary') or {}
-            salary_str = ('{}–{} {}'.format(salary.get('from') or '?', salary.get('to') or '?', salary.get('currency') or '') if salary else 'Не указана')
-            msg = (f'💼 {title}\n🏢 {employer}\n💰 {salary_str}\n🌍 Удалёнка в объявлении; доступность из любой страны НЕ проверена\n🔗 {item.get("alternate_url", "")}')
-            success = False
-            for chat_id in targets:
-                try:
-                    await bot.send_message(chat_id, msg)
-                    success = True
-                except Exception:
-                    logging.exception('Telegram delivery failed: %s', chat_id)
-            if success:
-                db.execute('INSERT OR IGNORE INTO seen VALUES (?)', (vacancy_id,))
-                sent += 1
-    return sent
+                sent, remaining = await deliver(bot, chat_id, data)
+                errors = any(not s['ok'] for s in data['sources'].values())
+                if sent or errors:
+                    await bot.send_message(chat_id, f'Плановая проверка: отправлено {sent}, осталось {remaining}.\n' + source_report(data))
+            except Exception as exc:
+                logging.error('Scheduled delivery failed: %s', type(exc).__name__)
 
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     init_db()
+    token = os.environ['TELEGRAM_BOT_TOKEN'].strip()
+    if not ALLOWED_CHAT_ID:
+        raise RuntimeError('Set ALLOWED_CHAT_ID in Railway Variables')
+    bot = Bot(token)
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(scan, 'interval', hours=INTERVAL, max_instances=1)
-    scheduler.start()
+    scheduler.add_job(scheduled, 'interval', hours=INTERVAL, args=[bot], max_instances=1)
     try:
+        await catalogue()  # Startup source diagnostics; does not send messages.
+        scheduler.start()
         await dp.start_polling(bot)
     finally:
-        scheduler.shutdown(wait=False)
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
         await bot.session.close()
 
 
