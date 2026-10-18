@@ -63,7 +63,7 @@ def subscribed():
 
 async def catalogue():
     # Refresh cached errors immediately after credentials change, without storing tokens.
-    config = hashlib.sha256(('multi-source-v03:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss')).encode()).hexdigest()
+    config = hashlib.sha256(('multi-source-v04-ats42:' + os.getenv('HH_ACCESS_TOKEN', '').strip() + ':' + os.getenv('HH_MODE', 'rss')).encode()).hexdigest()
     with database() as db:
         row = db.execute('SELECT checked, payload FROM search_cache WHERE id=1').fetchone()
     if row:
