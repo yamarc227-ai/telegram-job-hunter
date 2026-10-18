@@ -3,5 +3,5 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py sources.py boards.py ats_boards.json ./
+COPY main.py sources.py boards.py scoring.py ats_boards.json ./
 CMD ["python", "main.py"]
