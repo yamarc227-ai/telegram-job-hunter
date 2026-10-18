@@ -10,6 +10,7 @@ import httpx
 import main
 import sources
 from sources import Job, matches, salary_ceiling
+from scoring import classify, fit_sort_key, tier_counts, TIER_LABELS
 
 
 class Filters(unittest.TestCase):
@@ -283,6 +284,55 @@ class BoardParser(unittest.TestCase):
         self.assertEqual(len(entries), 42)
         self.assertEqual(len({(entry['ats'], entry['slug']) for entry in entries}), 42)
         self.assertIn(('ashby', 'higgsfieldai'), {(x['ats'], x['slug']) for x in entries})
+
+
+class RelevanceTiers(unittest.TestCase):
+    def job(self, title, desc='', scope='unverified', company='Example'):
+        return Job('test', title, company, 'https://example.com/job/1',
+                   desc, remote=True, remote_scope=scope)
+
+    def test_ideal_role_with_verified_signals(self):
+        job = self.job('Product Analyst',
+                       'SQL, Python, conversion funnel, cohort retention and GMV', 'worldwide')
+        result = classify(job)
+        self.assertEqual(result.tier, 'ideal')
+        self.assertGreaterEqual(result.score, 69)
+        self.assertTrue(any('SQL' in reason for reason in result.reasons))
+
+    def test_short_core_role_is_not_ideal(self):
+        job = self.job('Продуктовый аналитик', 'Краткое описание')
+        self.assertEqual(classify(job).tier, 'consider')
+
+    def test_data_role_is_consider_even_with_many_signals(self):
+        job = self.job('Data Analyst', 'SQL, Python, GMV, cohort, conversion funnel', 'worldwide')
+        self.assertEqual(classify(job).tier, 'consider')
+
+    def test_finance_role_without_relevant_signals_is_adjacent(self):
+        job = self.job('Финансовый аналитик', 'Бухгалтерская отчетность')
+        self.assertEqual(classify(job).tier, 'adjacent')
+
+    def test_game_and_commercial_fit(self):
+        game = self.job('Game Product Analyst', 'SQL and GMV metrics cohorts', 'worldwide',
+                        company='Game Studio')
+        generic = self.job('Аналитик', 'Ведение отчётности')
+        self.assertGreater(fit_sort_key(game), fit_sort_key(generic))
+
+    def test_count_and_labels(self):
+        jobs = [
+            self.job('Product Analyst', 'SQL Python cohorts retention', 'worldwide'),
+            self.job('Продуктовый аналитик', ''),
+            self.job('Финансовый аналитик', 'Бухгалтерская отчетность')
+        ]
+        counts = tier_counts(jobs)
+        self.assertEqual(counts, {'ideal': 1, 'consider': 1, 'adjacent': 1})
+        self.assertEqual(len(TIER_LABELS), 3)
+
+    def test_not_claim_worldwide_or_net(self):
+        job = self.job('Product Analyst', 'SQL, Python, cohort retention', 'unverified')
+        fit = classify(job)
+        self.assertIn('страна удалённой работы не подтверждена', fit.caveats)
+        self.assertTrue(any('net/gross' in item or 'зарплата не указана' in item for item in fit.caveats))
+        self.assertLessEqual(fit.score, 100)
 
 
 if __name__ == '__main__':
