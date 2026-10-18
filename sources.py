@@ -325,8 +325,11 @@ PROVIDERS = {'Aviasales': aviasales, 'Хабр Карьера': habr, 'Geekjob':
 
 
 async def collect():
+    from boards import collect_boards
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={'User-Agent': UA}) as client:
-        results = await asyncio.gather(*(fn(client) for fn in PROVIDERS.values()), return_exceptions=True)
+        results, board_result = await asyncio.gather(
+            asyncio.gather(*(fn(client) for fn in PROVIDERS.values()), return_exceptions=True),
+            collect_boards(client), return_exceptions=True)
     jobs, statuses = {}, {}
     for name, result in zip(PROVIDERS, results):
         if isinstance(result, Exception):
@@ -341,5 +344,13 @@ async def collect():
         suitable = [j for j in result if matches(j)]
         statuses[name] = {'ok': True, 'total': len(result), 'matched': len(suitable)}
         for job in suitable:
+            jobs.setdefault(job.key, asdict(job))
+    if isinstance(board_result, Exception):
+        statuses['Company boards'] = {'ok': False, 'error': type(board_result).__name__,
+                                      'total': 0, 'matched': 0}
+    else:
+        board_jobs, board_statuses = board_result
+        statuses.update(board_statuses)
+        for job in board_jobs:
             jobs.setdefault(job.key, asdict(job))
     return list(jobs.values()), statuses
