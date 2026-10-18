@@ -125,24 +125,42 @@ async def aviasales(client):
     return jobs
 
 
+HABR_TERMS = ('аналитик', 'analyst', 'analytics')
+
+
 async def habr(client):
-    response = await get(client, 'https://career.habr.com/vacancies/rss',
-                         params={'q': 'аналитик', 'remote': 'true'})
-    root = ET.fromstring(response.content)
-    if root.tag != 'rss':
-        raise ValueError('Источник вернул не RSS')
-    jobs = []
-    for item in root.findall('.//item'):
-        raw_title = item.findtext('title') or ''
-        title = raw_title.split('«', 1)[-1].split('»', 1)[0]
-        detail = text(item.findtext('description') or '')
-        # RSS itself is a current source; avoid fetching every vacancy page.
-        salary_match = re.search(r'(?:(?:от|до)\s+)?\d[\d\s]*(?:(?:до|—|–|-)\s*\d[\d\s]*)?(?:₽|руб\.?|RUB|\$|USD)', raw_title)
-        jobs.append(Job('Хабр Карьера', title, item.findtext('author') or 'Не указана',
-                        item.findtext('link') or '', detail,
-                        salary=salary_match[0].strip() if salary_match else 'Не указана в RSS',
-                        published=item.findtext('pubDate') or '', remote=bool(REMOTE.search(detail))))
-    return jobs
+    jobs = {}
+    successes = 0
+    for term in HABR_TERMS:
+        try:
+            response = await get(client, 'https://career.habr.com/vacancies/rss',
+                                 params={'q': term, 'remote': 'true'})
+            root = ET.fromstring(response.content)
+            if root.tag != 'rss':
+                raise ValueError('Источник вернул не RSS')
+        except (httpx.HTTPError, ET.ParseError, ValueError) as exc:
+            logging.warning('Habr RSS term %r failed: %s', term, type(exc).__name__)
+            continue
+        successes += 1
+        for item in root.findall('.//item'):
+            raw_title = item.findtext('title') or ''
+            title = raw_title.split('«', 1)[-1].split('»', 1)[0]
+            detail = text(item.findtext('description') or '')
+            salary_match = re.search(r'(?:(?:от|до)\s+)?\d[\d\s]*(?:(?:до|—|–|-)\s*\d[\d\s]*)?(?:₽|руб\.?|RUB|\$|USD)', raw_title)
+            url = item.findtext('link') or ''
+            if not url or not ROLE.search(title):
+                continue
+            job = Job('Хабр Карьера', title, item.findtext('author') or 'Не указана',
+                      url, detail,
+                      salary=salary_match[0].strip() if salary_match else 'Не указана в RSS',
+                      published=item.findtext('pubDate') or '', remote=bool(REMOTE.search(detail)))
+            try:
+                jobs[job.key] = job
+            except ValueError:
+                continue
+    if not successes:
+        raise SourceUnavailable('Ни один RSS-поиск Хабр Карьеры не доступен')
+    return list(jobs.values())
 
 
 async def geekjob(client):
