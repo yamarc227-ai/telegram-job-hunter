@@ -16,7 +16,8 @@ load_dotenv()
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 ALLOWED_CHAT_ID = os.getenv('ALLOWED_CHAT_ID', '').strip()
 INTERVAL = max(1, int(os.getenv('SEARCH_INTERVAL_HOURS', '6')))
-DB = Path(__file__).with_name('vacancies.sqlite3')
+DATA_DIR = Path(os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or Path(__file__).parent)
+DB = DATA_DIR / 'vacancies.sqlite3'
 TERMS = ['продуктовый аналитик', 'коммерческий аналитик', 'бизнес аналитик e-commerce', 'product analyst']
 EXCLUDE = ['банк', 'banking', 'dwh engineer', 'data engineer', 'etl developer', 'системный аналитик']
 
@@ -25,6 +26,7 @@ dp = Dispatcher()
 
 
 def init_db():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB) as db:
         db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)')
         db.execute('CREATE TABLE IF NOT EXISTS subscribers (chat_id INTEGER PRIMARY KEY)')
