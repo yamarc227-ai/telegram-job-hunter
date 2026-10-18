@@ -27,6 +27,11 @@ class Filters(unittest.TestCase):
         self.assertTrue(matches(replace(self.job, description='English-speaking team only')))
         self.assertEqual(salary_ceiling('от 250 000 до 270 000 ₽'), 270000)
         self.assertEqual(salary_ceiling('250K — 300K ₽'), 300000)
+        self.assertEqual(sources.remote_scope('Global (Remote)'), 'worldwide')
+        self.assertEqual(sources.remote_scope('Remote - US/Canada'), 'restricted')
+        self.assertEqual(sources.remote_scope('Remote - Europe Only'), 'restricted')
+        self.assertEqual(sources.remote_scope('Remote'), 'unverified')
+        self.assertFalse(matches(replace(self.job, remote_scope='restricted')))
         self.assertIsNone(salary_ceiling('от 200000 RUB до налогов'))
 
 
