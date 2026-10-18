@@ -164,7 +164,8 @@ async def start(message: Message):
         db.execute('INSERT OR IGNORE INTO subscribers VALUES (?)', (message.chat.id,))
     await message.answer('Подписка включена.\n/check — поиск сейчас\n/more — следующие вакансии\n'
                          '/sources — состояние источников\n/tiers — количество по категориям\n' 
-                         '/applications — трекер откликов\n/resume — загрузить резюме\n' 
+                         '/applications — трекер откликов\n/top — лучшие 5 вакансий с кнопками\n' 
+                         '/resume — загрузить резюме\n' 
                          '/ai_on и /ai_off — управление AI\n' 
                          '/profile — условия поиска\n/stop — отключить рассылку\n\n' + PROFILE)
 
@@ -203,6 +204,43 @@ async def tiers(message: Message):
     lines.append(f"Всего: {sum(counts.values())}")
     lines.append('Оценка по тексту вакансий, а не прогноз оффера. Географию, опыт, язык команды и net/gross уточнять.')
     await message.answer('\n'.join(lines))
+
+
+@dp.message(Command('top'))
+async def top(message: Message):
+    """Show the best five current listings again, even if already delivered.
+
+    Useful for trying buttons on jobs sent before inline keyboards existed.
+    Only runs when the user explicitly requests it.
+    """
+    if not allowed(message.chat.id):
+        return
+    async with lock:
+        data = await catalogue()
+        with database() as db:
+            disliked = {key for key, value in career.get_feedback(db, message.chat.id).items()
+                        if value == 'dislike'}
+            candidates = [Job(**raw) for raw in data['jobs']]
+            candidates = [j for j in candidates if j.key not in disliked]
+            candidates.sort(key=lambda j: (
+                fit_sort_key(j)[0],
+                fit_sort_key(j)[1] + career.feedback_bonus(j, db, message.chat.id),
+                fit_sort_key(j)[2]), reverse=True)
+        if not candidates:
+            await message.answer('Подходящих вакансий в подборке пока нет.')
+            return
+        await message.answer('Показываю 5 лучших вакансий с новыми кнопками. '
+                             'В том числе уже отправленные ранее.')
+        for job in candidates[:5]:
+            with database() as db:
+                career.store_job(db, job)
+            await message.bot.send_message(message.chat.id, card(job),
+                                           reply_markup=job_keyboard(job),
+                                           disable_web_page_preview=True)
+            with database() as db:
+                db.execute('INSERT OR IGNORE INTO deliveries VALUES (?, ?)',
+                           (message.chat.id, job.key))
+            await asyncio.sleep(0.1)
 
 
 @dp.message(Command('check', 'more'))
