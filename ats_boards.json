@@ -1,0 +1,212 @@
+[
+  {
+    "ats": "ashby",
+    "company": "Higgsfield AI",
+    "slug": "higgsfieldai"
+  },
+  {
+    "ats": "ashby",
+    "company": "OpenAI",
+    "slug": "openai"
+  },
+  {
+    "ats": "ashby",
+    "company": "ElevenLabs",
+    "slug": "elevenlabs"
+  },
+  {
+    "ats": "ashby",
+    "company": "Sierra",
+    "slug": "sierra"
+  },
+  {
+    "ats": "ashby",
+    "company": "Notion",
+    "slug": "notion"
+  },
+  {
+    "ats": "ashby",
+    "company": "Cursor",
+    "slug": "cursor"
+  },
+  {
+    "ats": "ashby",
+    "company": "Replit",
+    "slug": "replit"
+  },
+  {
+    "ats": "ashby",
+    "company": "Supabase",
+    "slug": "supabase"
+  },
+  {
+    "ats": "ashby",
+    "company": "Docker",
+    "slug": "docker"
+  },
+  {
+    "ats": "ashby",
+    "company": "Modal",
+    "slug": "modal"
+  },
+  {
+    "ats": "ashby",
+    "company": "Linear",
+    "slug": "linear"
+  },
+  {
+    "ats": "ashby",
+    "company": "PostHog",
+    "slug": "posthog"
+  },
+  {
+    "ats": "ashby",
+    "company": "Substack",
+    "slug": "substack"
+  },
+  {
+    "ats": "ashby",
+    "company": "Vercel",
+    "slug": "vercel"
+  },
+  {
+    "ats": "ashby",
+    "company": "Deel",
+    "slug": "deel"
+  },
+  {
+    "ats": "ashby",
+    "company": "Clerk",
+    "slug": "clerk"
+  },
+  {
+    "ats": "ashby",
+    "company": "Air Apps",
+    "slug": "airapps"
+  },
+  {
+    "ats": "ashby",
+    "company": "Rwazi",
+    "slug": "rwazi"
+  },
+  {
+    "ats": "lever",
+    "company": "Spotify",
+    "slug": "spotify"
+  },
+  {
+    "ats": "lever",
+    "company": "Palantir",
+    "slug": "palantir"
+  },
+  {
+    "ats": "lever",
+    "company": "Match Group",
+    "slug": "matchgroup"
+  },
+  {
+    "ats": "lever",
+    "company": "Zoox",
+    "slug": "zoox"
+  },
+  {
+    "ats": "lever",
+    "company": "WHOOP",
+    "slug": "whoop"
+  },
+  {
+    "ats": "lever",
+    "company": "Gopuff",
+    "slug": "gopuff"
+  },
+  {
+    "ats": "lever",
+    "company": "Aircall",
+    "slug": "aircall"
+  },
+  {
+    "ats": "lever",
+    "company": "Entrata",
+    "slug": "entrata"
+  },
+  {
+    "ats": "lever",
+    "company": "Netflix",
+    "slug": "netflix"
+  },
+  {
+    "ats": "lever",
+    "company": "Mistral AI",
+    "slug": "mistral"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Anthropic",
+    "slug": "anthropic"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Figma",
+    "slug": "figma"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Airbnb",
+    "slug": "airbnb"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Pinterest",
+    "slug": "pinterest"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Instacart",
+    "slug": "instacart"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "DoorDash",
+    "slug": "doordash"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Asana",
+    "slug": "asana"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Webflow",
+    "slug": "webflow"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Loom",
+    "slug": "loom"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Retool",
+    "slug": "retool"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Rippling",
+    "slug": "rippling"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Gusto",
+    "slug": "gusto"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Hugging Face",
+    "slug": "huggingface"
+  },
+  {
+    "ats": "greenhouse",
+    "company": "Perplexity",
+    "slug": "perplexity"
+  }
+]
