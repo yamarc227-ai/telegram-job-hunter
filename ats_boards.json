@@ -130,9 +130,9 @@
     "slug": "entrata"
   },
   {
-    "ats": "lever",
-    "company": "Netflix",
-    "slug": "netflix"
+    "ats": "ashby",
+    "company": "Mindly",
+    "slug": "mindly"
   },
   {
     "ats": "lever",
@@ -165,9 +165,9 @@
     "slug": "instacart"
   },
   {
-    "ats": "greenhouse",
-    "company": "DoorDash",
-    "slug": "doordash"
+    "ats": "ashby",
+    "company": "Photoroom",
+    "slug": "photoroom"
   },
   {
     "ats": "greenhouse",
@@ -180,19 +180,19 @@
     "slug": "webflow"
   },
   {
-    "ats": "greenhouse",
-    "company": "Loom",
-    "slug": "loom"
+    "ats": "ashby",
+    "company": "Wand",
+    "slug": "wand"
   },
   {
-    "ats": "greenhouse",
-    "company": "Retool",
-    "slug": "retool"
+    "ats": "ashby",
+    "company": "Peek",
+    "slug": "peek"
   },
   {
-    "ats": "greenhouse",
-    "company": "Rippling",
-    "slug": "rippling"
+    "ats": "ashby",
+    "company": "Glow25",
+    "slug": "glow25"
   },
   {
     "ats": "greenhouse",
@@ -200,13 +200,13 @@
     "slug": "gusto"
   },
   {
-    "ats": "greenhouse",
-    "company": "Hugging Face",
-    "slug": "huggingface"
+    "ats": "ashby",
+    "company": "Paddle",
+    "slug": "paddle"
   },
   {
-    "ats": "greenhouse",
-    "company": "Perplexity",
-    "slug": "perplexity"
+    "ats": "ashby",
+    "company": "Progress Partners",
+    "slug": "progress-partners"
   }
 ]
