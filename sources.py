@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 UA = 'PersonalJobHunter/0.2 (+https://github.com/yamarc227-ai/telegram-job-hunter)'
 ROLE = re.compile(r'аналитик|аналитика|analyst|analytics', re.I)
 SPECIALTY = re.compile(r'продукт|коммерч|бизнес|данных|маркетинг|финанс|рост|монетиз|\bbi\b|product|commercial|business|\bdata\b|marketing|e-commerce|growth|revenue|game', re.I)
-EXCLUDED = re.compile(r'системн|system[s]? analyst|data engineer|etl|\bdwh\b|банк|banking|1с|1c|битрикс|асутп|диасофт|full.?stack|фуллстек', re.I)
+EXCLUDED = re.compile(r'системн|system[s]? analyst|data engineer|etl|\bdwh\b|банк|\bbank\b|banking|1с|1c|битрикс|асутп|диасофт|full.?stack|фуллстек', re.I)
 REMOTE = re.compile(r'удал[её]н|remote|любой точк[еи] мира', re.I)
 
 
@@ -234,10 +234,11 @@ async def hh(client):
 
 
 def remote_scope(location):
+    """Conservative classification; not a guarantee of hiring eligibility."""
     region = (location or '').strip()
-    if re.search(r'worldwide|anywhere|work from anywhere|любой точк[еи] мира', region, re.I):
+    if re.search(r'\b(?:worldwide|anywhere|global)\b|work from anywhere|любой точк[еи] мира', region, re.I):
         return 'worldwide'
-    if re.fullmatch(r'US|USA|UK|EU|Europe|Canada|Germany|Poland|Russia|Russian Federation|United States|EMEA|APAC', region, re.I) or re.search(r'\b(?:US|USA|UK|EU|Europe|Canada)\s+only\b', region, re.I):
+    if re.search(r'\b(?:US|USA|U\.S\.|UK|EU|Europe|Canada|Germany|Poland|Russia|Russian Federation|United States|EMEA|APAC|Mexico|France|Spain|Portugal|Netherlands|Serbia|Cyprus)\b', region, re.I) or re.search(r'\bonly\b', region, re.I):
         return 'restricted'
     return 'unverified'
 
