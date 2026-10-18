@@ -81,11 +81,25 @@ async def catalogue():
 
 def source_report(data):
     when = datetime.fromtimestamp(data['checked'], timezone(timedelta(hours=3))).strftime('%d.%m %H:%M МСК')
+    statuses = data['sources']
     lines = [f'Источники — проверка {when}:']
-    for name, s in data['sources'].items():
-        lines.append(f"{name}: получено {s['total']}, кандидатов {s['matched']}" if s['ok']
-                     else f"{name}: недоступен ({s['error']})")
-    lines.append('Данные обновляются раз в 6 часов; повторный /check использует сохранённую подборку.')
+    for name, status in statuses.items():
+        if not name.startswith(('Ashby ·', 'Lever ·', 'Greenhouse ·')):
+            lines.append(f"{name}: получено {status['total']}, кандидатов {status['matched']}"
+                         if status['ok'] else f"{name}: недоступен ({status['error']})")
+    for prefix in ('Ashby ·', 'Lever ·', 'Greenhouse ·'):
+        part = [(name, status) for name, status in statuses.items() if name.startswith(prefix)]
+        if part:
+            ok = sum(1 for _, status in part if status['ok'])
+            selected = sum(status['matched'] for _, status in part)
+            lines.append(f"{prefix[:-2]}: проверено {len(part)} компаний, доступны {ok}, кандидатов {selected}")
+    errors = [(name, status) for name, status in statuses.items()
+              if not status['ok'] and name.startswith(('Ashby ·', 'Lever ·', 'Greenhouse ·'))]
+    for name, status in errors[:8]:
+        lines.append(f"⚠ {name}: {status['error']}")
+    if len(errors) > 8:
+        lines.append(f'...и ещё {len(errors) - 8} недоступных досок (подробнее в Railway Logs).')
+    lines.append('Повторный /check использует кэш до 6 часов. Worldwide remote проверяй перед откликом.')
     return '\n'.join(lines)
 
 
