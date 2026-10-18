@@ -11,8 +11,8 @@ import httpx
 from bs4 import BeautifulSoup
 
 UA = 'PersonalJobHunter/0.2 (+https://github.com/yamarc227-ai/telegram-job-hunter)'
-ROLE = re.compile(r'аналитик|analyst', re.I)
-SPECIALTY = re.compile(r'продукт|коммерч|бизнес|данных|\bbi\b|маркетинг|product|commercial|business|\bdata\b|marketing|e-commerce', re.I)
+ROLE = re.compile(r'аналитик|аналитика|analyst|analytics', re.I)
+SPECIALTY = re.compile(r'продукт|коммерч|бизнес|данных|маркетинг|финанс|рост|монетиз|\\bbi\\b|product|commercial|business|\\bdata\\b|marketing|e-commerce|growth|revenue|game', re.I)
 EXCLUDED = re.compile(r'системн|system[s]? analyst|data engineer|etl|\bdwh\b|банк|banking|1с|1c|битрикс|асутп|диасофт|full.?stack|фуллстек', re.I)
 REMOTE = re.compile(r'удал[её]н|remote|любой точк[еи] мира', re.I)
 
@@ -42,6 +42,7 @@ class Job:
     location: str = 'Уточнить ограничения по стране'
     published: str = ''
     remote: bool = False
+    remote_scope: str = 'unverified'  # worldwide | restricted | unverified
 
     @property
     def key(self):
@@ -63,19 +64,16 @@ def salary_ceiling(salary):
 
 
 def matches(job):
-    if not ROLE.search(job.title) or not SPECIALTY.search(job.title) or EXCLUDED.search(job.title + ' ' + job.company):
+    if not ROLE.search(job.title) or not SPECIALTY.search(job.title + ' ' + job.description[:600]) or EXCLUDED.search(job.title + ' ' + job.company):
         return False
-    if not job.remote:
-        return False
-    # Russian posting is a discovery signal, not proof of the team's working language.
-    if len(re.findall('[а-яё]', job.description.lower())) < 20:
+    if not job.remote or job.remote_scope == 'restricted':
         return False
     ceiling = salary_ceiling(job.salary)
     return ceiling is None or ceiling >= 250000
 
 
 def rank(job):
-    return (bool(re.search('продукт|коммерч|product|commercial|business|бизнес', job.title, re.I)),
+    return (job.remote_scope == 'worldwide', bool(re.search('продукт|коммерч|product|commercial|business|бизнес', job.title, re.I)),
             salary_ceiling(job.salary) is not None, job.published)
 
 
@@ -152,7 +150,7 @@ class SourceUnavailable(Exception):
     """Safe, user-facing source status; never contains response bodies or tokens."""
 
 
-async def hh(client):
+async def hh_api(client):
     token = os.getenv('HH_ACCESS_TOKEN', '').strip()
     if not token:
         raise SourceUnavailable('не настроен HH_ACCESS_TOKEN в Railway')
@@ -193,7 +191,137 @@ async def hh(client):
     return jobs
 
 
-PROVIDERS = {'Aviasales': aviasales, 'Хабр Карьера': habr, 'Geekjob': geekjob, 'hh.ru': hh}
+
+# HH exposes a search RSS endpoint. Its availability from servers is not
+# guaranteed; handle CAPTCHA/403 gracefully. No HTML scraping or evasion.
+HH_TERMS = ('продуктовый аналитик', 'бизнес аналитик', 'аналитик данных')
+
+
+async def hh_rss(client):
+    jobs = {}
+    for term in HH_TERMS:
+        r = await client.get('https://hh.ru/search/vacancy/rss',
+                             params={'text': term, 'schedule': 'remote',
+                                     'period': 14, 'order_by': 'publication_time'},
+                             follow_redirects=False)
+        if r.status_code in (401, 403, 429):
+            raise SourceUnavailable(f'HTTP {r.status_code}: hh RSS требует доступ/проверку')
+        r.raise_for_status()
+        if not r.content.lstrip().startswith(b'<?xml') and 'xml' not in r.headers.get('content-type', '').lower():
+            raise SourceUnavailable('hh RSS вернул не XML (возможно капча)')
+        root = ET.fromstring(r.content)
+        if root.tag != 'rss':
+            raise SourceUnavailable('hh RSS вернул неожиданный формат')
+        for item in root.findall('.//item'):
+            raw = item.findtext('title') or ''
+            url = item.findtext('link') or ''
+            if not url or not ROLE.search(raw):
+                continue
+            title = raw.split(' - ', 1)[0]
+            jobs[url] = Job('hh.ru RSS', title, 'Уточнить', url,
+                            text(item.findtext('description') or title),
+                            published=item.findtext('pubDate') or '', remote=True)
+    return list(jobs.values())
+
+
+async def hh(client):
+    mode = os.getenv('HH_MODE', 'rss').strip().lower()
+    if mode == 'rss':
+        return await hh_rss(client)
+    if mode == 'api':
+        return await hh_api(client)
+    raise SourceUnavailable('HH_MODE должен быть rss или api')
+
+
+def remote_scope(location):
+    region = (location or '').strip()
+    if re.search(r'worldwide|anywhere|work from anywhere|любой точк[еи] мира', region, re.I):
+        return 'worldwide'
+    if re.fullmatch(r'US|USA|UK|EU|Europe|Canada|Germany|Poland|Russia|Russian Federation|United States|EMEA|APAC', region, re.I) or re.search(r'\b(?:US|USA|UK|EU|Europe|Canada)\s+only\b', region, re.I):
+        return 'restricted'
+    return 'unverified'
+
+
+async def remotive(client):
+    response = await get(client, 'https://remotive.com/api/remote-jobs')
+    data = response.json()
+    if not isinstance(data.get('jobs'), list):
+        raise ValueError('Unexpected Remotive response')
+    jobs = []
+    for item in data['jobs']:
+        title = item.get('title', '')
+        url = item.get('url', '')
+        if not ROLE.search(title) or not url:
+            continue
+        location = item.get('candidate_required_location') or 'Уточнить'
+        jobs.append(Job('Remotive', title, item.get('company_name', ''), url,
+                        text(item.get('description') or ''), item.get('salary') or 'Не указана',
+                        location, item.get('publication_date', ''), True, remote_scope(location)))
+    return jobs
+
+
+async def remoteok(client):
+    response = await get(client, 'https://remoteok.com/api')
+    data = response.json()
+    if not isinstance(data, list):
+        raise ValueError('Unexpected Remote OK response')
+    jobs = []
+    for item in data:
+        if not isinstance(item, dict) or not ROLE.search(item.get('position', '')):
+            continue
+        url = item.get('url') or item.get('apply_url')
+        if not url:
+            continue
+        location = item.get('location') or 'Уточнить'
+        jobs.append(Job('Remote OK', item.get('position', ''), item.get('company', ''), url,
+                        text(item.get('description') or ''), 'Не указана',
+                        location, item.get('date', ''), True, remote_scope(location)))
+    return jobs
+
+
+async def weworkremotely(client):
+    jobs = {}
+    for path in ('remote-product-jobs.rss', 'remote-sales-and-marketing-jobs.rss',
+                 'remote-management-and-finance-jobs.rss'):
+        r = await get(client, 'https://weworkremotely.com/categories/' + path)
+        root = ET.fromstring(r.content)
+        if root.tag != 'rss':
+            raise ValueError('Unexpected WWR RSS response')
+        for item in root.findall('.//item'):
+            raw = item.findtext('title') or ''
+            title = raw.split(': ', 1)[-1]
+            company = raw.split(': ', 1)[0] if ': ' in raw else 'Не указана'
+            url = item.findtext('link') or ''
+            if not ROLE.search(title) or not url:
+                continue
+            description = text(item.findtext('description') or '')
+            scope = 'worldwide' if re.search(r'worldwide|anywhere', description, re.I) else 'unverified'
+            jobs[url] = Job('We Work Remotely', title, company, url, description,
+                            published=item.findtext('pubDate') or '', remote=True, remote_scope=scope)
+    return list(jobs.values())
+
+
+async def arbeitnow(client):
+    r = await get(client, 'https://arbeitnow.com/api/job-board-api')
+    data = r.json()
+    if not isinstance(data.get('data'), list):
+        raise ValueError('Unexpected Arbeitnow response')
+    jobs = []
+    for item in data['data']:
+        title = item.get('title', '')
+        url = item.get('url', '')
+        if not ROLE.search(title) or not url:
+            continue
+        location = item.get('location') or 'Уточнить'
+        jobs.append(Job('Arbeitnow', title, item.get('company_name', ''), url,
+                        text(item.get('description') or ''), location=location,
+                        published=str(item.get('created_at') or ''),
+                        remote=bool(item.get('remote')),
+                        remote_scope=remote_scope(location)))
+    return jobs
+
+
+PROVIDERS = {'Aviasales': aviasales, 'Хабр Карьера': habr, 'Geekjob': geekjob, 'hh.ru': hh, 'Remotive': remotive, 'Remote OK': remoteok, 'We Work Remotely': weworkremotely, 'Arbeitnow': arbeitnow}
 
 
 async def collect():
